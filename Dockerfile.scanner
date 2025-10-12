@@ -1,0 +1,21 @@
+# ---- Imagen final con Sonar Scanner ----
+FROM sonarsource/sonar-scanner-cli:11
+
+# Cambiamos a root para instalar paquetes
+USER root
+
+# Instalar jq usando dnf (Amazon Linux)
+RUN dnf install -y jq && dnf clean all
+
+# Copiar archivos de configuración
+COPY whitelist.json /work/whitelist.json
+COPY process-projects.sh /work/process-projects.sh
+
+# Dar permisos de ejecución
+RUN chmod +x /work/process-projects.sh
+
+# Volvemos al usuario no root del scanner
+USER scanner-cli
+
+# Usar el script como punto de entrada
+ENTRYPOINT ["/work/process-projects.sh"]

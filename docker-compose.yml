@@ -1,0 +1,66 @@
+services:
+  sonarqube:
+    image: sonarqube:community
+    container_name: sonarqube
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${SONARQUBE_PORT}:9000"
+    environment:
+      SONAR_JDBC_URL: ${SONAR_JDBC_URL}
+      SONAR_JDBC_USERNAME: ${SONAR_JDBC_USERNAME}
+      SONAR_JDBC_PASSWORD: ${SONAR_JDBC_PASSWORD}
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+    restart: ${RESTART_POLICY}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/api/system/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  db:
+    image: postgres:15
+    container_name: sonarqube_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgresql_data:/var/lib/postgresql/data
+    restart: ${RESTART_POLICY}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # CLI oficial del scanner (se ejecuta a demanda)
+  scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile.scanner
+    image: aoc-sonar-scanner:latest
+    container_name: sonarqube_scanner
+    depends_on:
+      sonarqube:
+        condition: service_started   # ya esperamos salud en el script
+    env_file:
+      - .env
+    environment:
+      SONAR_HOST_URL: http://sonarqube:9000
+      SONAR_LOGIN: ${SONAR_TOKEN}
+    working_dir: /work
+    volumes:
+      # Montamos la raíz personal (read-write para permitir que el scanner cree .scannerwork)
+      - "${PROJECTS_ROOT_PERSONAL}:/work/personal:rw"
+
+volumes:
+  sonarqube_data:
+  sonarqube_extensions:
+  sonarqube_logs:
+  postgresql_data:

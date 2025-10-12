@@ -1,0 +1,34 @@
+{
+  "projects": [
+    {
+      "root": "personal",
+      "path": "Connect-Backend/Connect-Auth",
+      "projectKey": "connect-auth",
+      "exclusions": [
+        "**/node_modules/**",
+        "**/dist/**",
+        "**/build/**",
+        "**/.next/**",
+        "**/coverage/**",
+        "**/.git/**",
+        "**/.cache/**"
+      ]
+    },
+    {
+      "root": "personal",
+      "path": "Connect-Frontend",
+      "projectKey": "connect-frontend"
+    }
+  ],
+  "defaults": {
+    "exclusions": [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/build/**",
+      "**/.next/**",
+      "**/coverage/**",
+      "**/.git/**",
+      "**/.cache/**"
+    ]
+  }
+}
