@@ -1,29 +1,23 @@
 {
   "mounts": [
     {
-      "host": "C:/Users/alice/Projects",
+      "host": "C:/proyect1",
       "container": "/work/src1"
+    },
+    {
+      "host": "C:/proyect2",
+      "container": "/work/src2"
     }
   ],
   "projects": [
     {
-      "hostPath": "C:\\Users\\alice\\Projects\\Connect-Backend\\Connect-Auth",
-      "projectKey": "connect-auth"
+      "hostPath": "C:\\proyect1",
+      "path": "SonarQube"
     },
     {
-      "hostPath": "C:\\Users\\alice\\Projects\\Connect-Frontend",
-      "projectKey": "connect-frontend"
+      "hostPath": "C:\\proyect2",
+      "path": ""
     }
   ]
-  "defaults": {
-    "exclusions": [
-      "**/node_modules/**",
-      "**/dist/**",
-      "**/build/**",
-      "**/.next/**",
-      "**/coverage/**",
-      "**/.git/**",
-      "**/.cache/**"
-    ]
-  }
 }
+
