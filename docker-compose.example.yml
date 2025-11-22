@@ -15,7 +15,7 @@ services:
       - sonarqube_data:/opt/sonarqube/data
       - sonarqube_extensions:/opt/sonarqube/extensions
       - sonarqube_logs:/opt/sonarqube/logs
-    restart: ${RESTART_POLICY}
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:9000/api/system/status || exit 1"]
       interval: 30s
@@ -32,7 +32,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgresql_data:/var/lib/postgresql/data
-    restart: ${RESTART_POLICY}
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -48,7 +48,7 @@ services:
     container_name: sonarqube_scanner
     depends_on:
       sonarqube:
-        condition: service_started   # ya esperamos salud en el script
+        condition: service_started   # el script ya espera salud antes de correr
     env_file:
       - .env
     environment:
@@ -56,8 +56,9 @@ services:
       SONAR_LOGIN: ${SONAR_TOKEN}
     working_dir: /work
     volumes:
-      # Montamos la raíz personal (read-write para permitir que el scanner cree .scannerwork)
-      - "${PROJECTS_ROOT_PERSONAL}:/work/personal:rw"
+      # Ajusta estas rutas para que coincidan con whitelist.json -> mounts
+      - "C:/Repos:/work/src1:rw"
+      - "D:/Clientes:/work/src2:rw"
 
 volumes:
   sonarqube_data:

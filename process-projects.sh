@@ -1,6 +1,54 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+normalize_windows_path() {
+  local raw="${1:-}"
+  raw="${raw//\\/\/}"
+  echo "$raw"
+}
+
+strip_trailing_slash() {
+  local value="${1:-}"
+  while [[ -n "$value" && "$value" != "/" && "$value" == */ ]]; do
+    value="${value%/}"
+  done
+  echo "$value"
+}
+
+to_lower() {
+  tr '[:upper:]' '[:lower:]' <<<"${1:-}"
+}
+
+map_host_path_to_container() {
+  local host_path_raw="${1:-}"
+  [[ -z "$host_path_raw" ]] && return 0
+
+  local normalized_host="$(strip_trailing_slash "$(normalize_windows_path "$host_path_raw")")"
+  local lower_host="$(to_lower "$normalized_host")"
+
+  local best_match=""
+  local best_len=-1
+
+  for idx in "${!MOUNT_HOSTS[@]}"; do
+    local base="${MOUNT_HOSTS[$idx]}"
+    local base_lower="${MOUNT_HOSTS_LOWER[$idx]}"
+    local container_base="${MOUNT_CONTAINERS[$idx]}"
+    local base_len=${#base}
+
+    if [[ "$lower_host" == "$base_lower"* ]]; then
+      if (( base_len > best_len )); then
+        local suffix="${normalized_host:base_len}"
+        local candidate="$container_base$suffix"
+        candidate="$(strip_trailing_slash "$candidate")"
+        best_match="$candidate"
+        best_len=$base_len
+      fi
+    fi
+  done
+
+  [[ -n "$best_match" ]] && echo "$best_match"
+}
+
 SONAR_HOST_URL="${SONAR_HOST_URL:-http://sonarqube:9000}"
 WHITELIST_FILE="/work/whitelist.json"
 
@@ -17,41 +65,125 @@ if [[ ! -f "$WHITELIST_FILE" ]]; then
   exit 1
 fi
 
-# 1) Espera a que SonarQube esté listo
+# 1) Configurar montajes disponibles para mapear rutas del host
+declare -a MOUNT_HOSTS=()
+declare -a MOUNT_HOSTS_LOWER=()
+declare -a MOUNT_CONTAINERS=()
+
+readarray -t mount_entries < <(jq -c '.mounts[]?' "$WHITELIST_FILE")
+
+for mount_entry in "${mount_entries[@]}"; do
+  host_dir=$(jq -r '.host // empty' <<<"$mount_entry")
+  container_dir=$(jq -r '.container // empty' <<<"$mount_entry")
+
+  if [[ -z "$host_dir" || -z "$container_dir" ]]; then
+    echo "⚠️  Montaje inválido (host/container requeridos): $mount_entry"
+    continue
+  fi
+
+  host_norm="$(strip_trailing_slash "$(normalize_windows_path "$host_dir")")"
+  container_norm="$(strip_trailing_slash "$container_dir")"
+
+  if [[ -z "$host_norm" || -z "$container_norm" ]]; then
+    echo "⚠️  Montaje inválido tras normalizar: $mount_entry"
+    continue
+  fi
+
+  MOUNT_HOSTS+=("$host_norm")
+  MOUNT_HOSTS_LOWER+=("$(to_lower "$host_norm")")
+  MOUNT_CONTAINERS+=("$container_norm")
+
+  if [[ ! -d "$container_norm" ]]; then
+    echo "⚠️  El contenedor no ve $container_norm (verifica docker-compose.yml)"
+  fi
+done
+
+if [[ ${#MOUNT_HOSTS[@]} -eq 0 ]]; then
+  while IFS='=' read -r env_key env_value; do
+    [[ -z "$env_value" ]] && continue
+    index="${env_key#MOUNT_SRC}"
+    [[ "$index" == "$env_key" ]] && continue
+    [[ -z "$index" ]] && continue
+
+    host_norm="$(strip_trailing_slash "$(normalize_windows_path "$env_value")")"
+    container_norm="/work/src$index"
+
+    MOUNT_HOSTS+=("$host_norm")
+    MOUNT_HOSTS_LOWER+=("$(to_lower "$host_norm")")
+    MOUNT_CONTAINERS+=("$container_norm")
+
+    if [[ ! -d "$container_norm" ]]; then
+      echo "⚠️  El contenedor no ve $container_norm (verifica docker-compose.yml)"
+    fi
+  done < <(env | grep -E '^MOUNT_SRC[0-9]+=' | sort)
+fi
+
+if [[ ${#MOUNT_HOSTS[@]} -eq 0 ]]; then
+  echo "❌ No hay montajes válidos (verifica whitelist.json o variables MOUNT_SRCn)"
+  exit 1
+fi
+
+# 2) Espera a que SonarQube esté listo (status must be UP)
 echo "⏳ Esperando a que SonarQube esté listo en $SONAR_HOST_URL ..."
 for i in {1..60}; do
-  if curl -fsS "$SONAR_HOST_URL/api/system/status" >/dev/null 2>&1; then
-    echo "✅ SonarQube listo"
-    break
+  # Intentamos obtener el JSON de estado. Usamos jq para extraer .status cuando esté disponible.
+  resp=$(curl -fsS "$SONAR_HOST_URL/api/system/status" 2>/dev/null || true)
+  if [[ -n "$resp" ]]; then
+    status=$(jq -r '.status // empty' <<<"$resp" 2>/dev/null || true)
+    if [[ "$status" == "UP" ]]; then
+      echo "✅ SonarQube listo (status=UP)"
+      break
+    else
+      # Mostrar estado intermedio (STARTING, etc.) para debugging
+      echo "⏳ SonarQube status: ${status:-unknown} (esperando UP)..."
+    fi
+  else
+    echo "⏳ SonarQube no responde aún (intentos: $i)..."
   fi
+
   sleep 5
   [[ $i -eq 60 ]] && { echo "❌ Timeout esperando SonarQube"; exit 1; }
 done
 
-# 2) Leer whitelist
+# 3) Leer whitelist
 readarray -t projects < <(jq -c '.projects[]' "$WHITELIST_FILE")
-default_exclusions=$(jq -r '.defaults.exclusions // [] | join(",")' "$WHITELIST_FILE")
-
 echo "📋 Procesando ${#projects[@]} proyectos..."
 
-# 3) Iterar proyectos
+# 4) Iterar proyectos
 for proj in "${projects[@]}"; do
-  root=$(jq -r '.root' <<<"$proj")
-  path=$(jq -r '.path' <<<"$proj")
+  path=$(jq -r '.path // empty' <<<"$proj")
   project_key=$(jq -r '.projectKey // empty' <<<"$proj")
-  has_excls=$(jq -r 'has("exclusions")' <<<"$proj")
+  host_path=$(jq -r '.hostPath // empty' <<<"$proj")
+  # hostPath define la ruta absoluta del proyecto en el host (obligatoria)
 
-  case "$root" in
-    personal) container_base="/work/personal" ;;
-    *) echo "⚠️  root inválido '$root' (usa 'personal')" && continue ;;
-  esac
+  if [[ -z "$host_path" ]]; then
+    echo "⚠️  hostPath no definido en la entrada: $proj"
+    continue
+  fi
 
-  full_path="$container_base/$path"
+  base_path="$(map_host_path_to_container "$host_path")"
+  if [[ -z "$base_path" ]]; then
+    echo "⚠️  No se pudo mapear hostPath='$host_path'"
+    continue
+  fi
+
+  normalized_subpath="${path#/}"
+  if [[ -n "$normalized_subpath" ]]; then
+    full_path="$base_path/$normalized_subpath"
+  else
+    full_path="$base_path"
+  fi
+
   [[ ! -d "$full_path" ]] && { echo "⚠️  No existe: $full_path"; continue; }
 
   # projectKey por defecto: nombre de carpeta
-  project_key="${project_key:-$(basename "$full_path")}"
-  echo "🔍 Analizando: $root/$path (projectKey=$project_key)"
+  project_key_default="$(basename -- "$full_path")"
+  project_key="${project_key:-$project_key_default}"
+
+  display_label="$host_path"
+  [[ -n "$path" ]] && display_label="$display_label/$path"
+
+  echo "🔍 Analizando: $display_label -> $full_path (projectKey=$project_key)"
 
   cd "$full_path"
 
@@ -61,20 +193,15 @@ for proj in "${projects[@]}"; do
     continue
   fi
 
-  # Exclusiones inline si fueron definidas en el JSON (tienen prioridad sobre defaults)
   scanner_args=()
-  if [[ "$has_excls" == "true" ]]; then
-    excl_joined=$(jq -r '.exclusions | join(",")' <<<"$proj")
-    [[ -n "$excl_joined" ]] && scanner_args+=(-D"sonar.exclusions=$excl_joined")
-  fi
 
   echo "🚀 Ejecutando sonar-scanner en $full_path"
   if sonar-scanner \
       -D"sonar.host.url=$SONAR_HOST_URL" \
       -D"sonar.token=$SONAR_TOKEN" \
       "${scanner_args[@]}"; then
-    echo "✅ Completado: $root/$path"
+    echo "✅ Completado: $display_label"
   else
-    echo "❌ Falló: $root/$path"
+    echo "❌ Falló: $display_label"
   fi
 done

@@ -1,25 +1,20 @@
 {
-  "projects": [
+  "mounts": [
     {
-      "root": "personal",
-      "path": "Connect-Backend/Connect-Auth",
-      "projectKey": "connect-auth",
-      "exclusions": [
-        "**/node_modules/**",
-        "**/dist/**",
-        "**/build/**",
-        "**/.next/**",
-        "**/coverage/**",
-        "**/.git/**",
-        "**/.cache/**"
-      ]
-    },
-    {
-      "root": "personal",
-      "path": "Connect-Frontend",
-      "projectKey": "connect-frontend"
+      "host": "C:/Users/alice/Projects",
+      "container": "/work/src1"
     }
   ],
+  "projects": [
+    {
+      "hostPath": "C:\\Users\\alice\\Projects\\Connect-Backend\\Connect-Auth",
+      "projectKey": "connect-auth"
+    },
+    {
+      "hostPath": "C:\\Users\\alice\\Projects\\Connect-Frontend",
+      "projectKey": "connect-frontend"
+    }
+  ]
   "defaults": {
     "exclusions": [
       "**/node_modules/**",
