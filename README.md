@@ -64,6 +64,17 @@ Este repositorio empaqueta una instancia de SonarQube Community Edition, una bas
 - Los datos, extensiones y logs de SonarQube persisten en los volúmenes Docker (`sonarqube_data`, `sonarqube_extensions`, `sonarqube_logs`).
 - Regenera `SONAR_TOKEN` cuando revoques el existente y actualiza `.env` de inmediato.
 
+### Escaneo rápido de un solo proyecto
+
+1. Duplica `whitelist.single.example.json` a `whitelist.single.json` y reemplaza las rutas por las de tu proyecto. Asegúrate de que el campo `container` coincida con `/work/project` (es donde se monta el repositorio en esta variante).
+2. Define `SINGLE_PROJECT_HOST_PATH` con la ruta absoluta del proyecto. Puedes añadirlo a `.env` o pasarlo inline al comando (`SINGLE_PROJECT_HOST_PATH="C:/Repos/MiProyecto" docker compose ...`). Asegúrate también de que `SONAR_TOKEN` esté presente en `.env` o exportado en tu shell.
+3. Ejecuta el scanner puntual (la primera vez descargará `jq` dentro del contenedor):
+   ```bash
+   docker compose -f docker-compose.scanner.yml run --rm scanner-single
+   ```
+   El servicio monta el proyecto en `/work/project`, reemplaza `whitelist.json` por tu `whitelist.single.json` y reutiliza `process-projects.sh` (montado desde el host) para analizar solo ese repositorio.
+4. Si quieres usar otro archivo de whitelist, establece `SINGLE_WHITELIST_FILE` apuntando al JSON deseado antes de ejecutar el comando.
+
 ## Resolución de problemas
 
 - **401 Authentication errors** – el scanner no pudo autenticarse con el token. Genera uno nuevo y actualiza `.env`.

@@ -49,9 +49,9 @@ map_host_path_to_container() {
   [[ -n "$best_match" ]] && echo "$best_match"
 }
 
-SONAR_HOST_URL="${SONAR_HOST_URL:-http://sonarqube:9000}"
-WHITELIST_FILE="/work/whitelist.json"
-
+SONAR_DOCKER_URL="${SONAR_DOCKER_URL:-http://sonarqube:9000}"
+WHITELIST_FILE="/work/${SINGLE_WHITELIST_FILE:-whitelist.json}"
+ 
 echo "🔍 Iniciando procesamiento de proyectos..."
 
 # 0) Validaciones básicas
@@ -124,10 +124,10 @@ if [[ ${#MOUNT_HOSTS[@]} -eq 0 ]]; then
 fi
 
 # 2) Espera a que SonarQube esté listo (status must be UP)
-echo "⏳ Esperando a que SonarQube esté listo en $SONAR_HOST_URL ..."
+echo "⏳ Esperando a que SonarQube esté listo en $SONAR_DOCKER_URL ..."
 for i in {1..60}; do
   # Intentamos obtener el JSON de estado. Usamos jq para extraer .status cuando esté disponible.
-  resp=$(curl -fsS "$SONAR_HOST_URL/api/system/status" 2>/dev/null || true)
+  resp=$(curl -fsS "$SONAR_DOCKER_URL/api/system/status" 2>/dev/null || true)
   if [[ -n "$resp" ]]; then
     status=$(jq -r '.status // empty' <<<"$resp" 2>/dev/null || true)
     if [[ "$status" == "UP" ]]; then
@@ -180,8 +180,11 @@ for proj in "${projects[@]}"; do
   project_key_default="$(basename -- "$full_path")"
   project_key="${project_key:-$project_key_default}"
 
-  display_label="$host_path"
-  [[ -n "$path" ]] && display_label="$display_label/$path"
+  # Normalizar display_label con backslashes
+  display_label="$(normalize_windows_path "$host_path")"
+  if [[ -n "$normalized_subpath" ]]; then
+    display_label="$display_label\\$normalized_subpath"
+  fi
 
   echo "🔍 Analizando: $display_label -> $full_path (projectKey=$project_key)"
 
@@ -197,7 +200,7 @@ for proj in "${projects[@]}"; do
 
   echo "🚀 Ejecutando sonar-scanner en $full_path"
   if sonar-scanner \
-      -D"sonar.host.url=$SONAR_HOST_URL" \
+      -D"sonar.host.url=$SONAR_DOCKER_URL" \
       -D"sonar.token=$SONAR_TOKEN" \
       "${scanner_args[@]}"; then
     echo "✅ Completado: $display_label"
