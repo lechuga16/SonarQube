@@ -1,22 +1,8 @@
 {
-  "mounts": [
-    {
-      "host": "C:/proyect1",
-      "container": "/work/src1"
-    },
-    {
-      "host": "C:/proyect2",
-      "container": "/work/src2"
-    }
-  ],
   "projects": [
     {
       "hostPath": "C:\\proyect1",
       "path": "SonarQube"
-    },
-    {
-      "hostPath": "C:\\proyect2",
-      "path": ""
     }
   ]
 }

@@ -23,8 +23,10 @@ map_host_path_to_container() {
   local host_path_raw="${1:-}"
   [[ -z "$host_path_raw" ]] && return 0
 
-  local normalized_host="$(strip_trailing_slash "$(normalize_windows_path "$host_path_raw")")"
-  local lower_host="$(to_lower "$normalized_host")"
+  local normalized_host
+  normalized_host="$(strip_trailing_slash "$(normalize_windows_path "$host_path_raw")")"
+  local lower_host
+  lower_host="$(to_lower "$normalized_host")"
 
   local best_match=""
   local best_len=-1
@@ -49,35 +51,153 @@ map_host_path_to_container() {
   [[ -n "$best_match" ]] && echo "$best_match"
 }
 
-SONAR_DOCKER_URL="${SONAR_DOCKER_URL:-http://sonarqube:9000}"
-WHITELIST_FILE="/work/${SINGLE_WHITELIST_FILE:-whitelist.json}"
- 
-echo "🔍 Iniciando procesamiento de proyectos..."
+SONAR_HOST_URL="${SONAR_HOST_URL:-http://sonarqube:9000}"
+SONAR_USER_HOME="${SONAR_USER_HOME:-/work/.sonar}"
+SONAR_WORK_ROOT="${SONAR_WORK_ROOT:-/work/.scannerwork}"
+SONAR_WAIT_TIMEOUT_SECONDS="${SONAR_WAIT_TIMEOUT_SECONDS:-300}"
+SONAR_WAIT_INTERVAL_SECONDS="${SONAR_WAIT_INTERVAL_SECONDS:-5}"
+SCAN_PARALLELISM="${SCAN_PARALLELISM:-1}"
+WHITELIST_FILE="/work/whitelist.json"
 
-# 0) Validaciones básicas
+log_info() { echo "[INFO] $*"; }
+log_warn() { echo "[WARN] $*"; }
+log_error() { echo "[ERROR] $*"; }
+
+validate_whitelist() {
+  local file="$1"
+  local -a errors=()
+  local -a mount_hosts_lower=()
+
+  if ! jq -e 'type=="object"' "$file" >/dev/null 2>&1; then
+    errors+=("La raiz debe ser un objeto JSON.")
+  fi
+
+  if ! jq -e '.projects | type=="array" and length>0' "$file" >/dev/null 2>&1; then
+    errors+=("projects debe ser un arreglo con al menos un elemento.")
+  fi
+
+  if ! jq -e '.mounts | type=="array" and length>0' "$file" >/dev/null 2>&1; then
+    errors+=("mounts debe ser un arreglo con al menos un elemento.")
+  fi
+
+  local invalid_projects
+  invalid_projects="$(jq '[.projects[]? | select((.hostPath|type)!="string" or (.hostPath|length)==0)] | length' "$file")"
+  if [[ "$invalid_projects" -gt 0 ]]; then
+    errors+=("Cada project debe tener hostPath string no vacio.")
+  fi
+
+  local invalid_path
+  invalid_path="$(jq '[.projects[]? | select(has("path") and (.path|type)!="string")] | length' "$file")"
+  if [[ "$invalid_path" -gt 0 ]]; then
+    errors+=("path debe ser string cuando este presente.")
+  fi
+
+  local invalid_project_key
+  invalid_project_key="$(jq '[.projects[]? | select(has("projectKey") and (.projectKey|type)!="string")] | length' "$file")"
+  if [[ "$invalid_project_key" -gt 0 ]]; then
+    errors+=("projectKey debe ser string cuando este presente.")
+  fi
+
+  local invalid_mounts
+  invalid_mounts="$(jq '[.mounts[]? | select((.host|type)!="string" or (.host|length)==0 or (.container|type)!="string" or (.container|length)==0)] | length' "$file")"
+  if [[ "$invalid_mounts" -gt 0 ]]; then
+    errors+=("Cada mount debe tener host y container (strings no vacios).")
+  fi
+
+  readarray -t mount_hosts_lower < <(jq -r '.mounts[]?.host // empty' "$file" | awk 'NF' | tr '[:upper:]' '[:lower:]')
+
+  if [[ ${#mount_hosts_lower[@]} -gt 0 ]]; then
+    local -a uncovered=()
+    while IFS= read -r host_path; do
+      [[ -z "$host_path" ]] && continue
+      local normalized
+      normalized="$(normalize_windows_path "$host_path")"
+      local lower
+      lower="$(to_lower "$normalized")"
+      local matched=0
+      for base in "${mount_hosts_lower[@]}"; do
+        if [[ "$lower" == "$base"* ]]; then
+          matched=1
+          break
+        fi
+      done
+      if (( matched == 0 )); then
+        uncovered+=("$host_path")
+      fi
+    done < <(jq -r '.projects[]?.hostPath // empty' "$file")
+
+    if (( ${#uncovered[@]} > 0 )); then
+      errors+=("Los siguientes hostPath no estan cubiertos por ningun mount.host:")
+      for item in "${uncovered[@]}"; do
+        errors+=("  - $item")
+      done
+    fi
+  fi
+
+  if (( ${#errors[@]} > 0 )); then
+    log_error "whitelist.json no cumple el esquema esperado (ver whitelist.schema.json):"
+    for msg in "${errors[@]}"; do
+      log_error "- $msg"
+    done
+    exit 1
+  fi
+}
+
+ensure_number() {
+  local value="${1:-}"
+  local fallback="${2:-}"
+  if [[ -z "$value" || ! "$value" =~ ^[0-9]+$ ]]; then
+    echo "$fallback"
+  else
+    echo "$value"
+  fi
+}
+
+SONAR_WAIT_TIMEOUT_SECONDS="$(ensure_number "$SONAR_WAIT_TIMEOUT_SECONDS" 300)"
+SONAR_WAIT_INTERVAL_SECONDS="$(ensure_number "$SONAR_WAIT_INTERVAL_SECONDS" 5)"
+SCAN_PARALLELISM="$(ensure_number "$SCAN_PARALLELISM" 1)"
+
+if (( SONAR_WAIT_INTERVAL_SECONDS == 0 )); then
+  SONAR_WAIT_INTERVAL_SECONDS=5
+fi
+
+log_info "Iniciando procesamiento de proyectos..."
+
 if [[ -z "${SONAR_TOKEN:-}" ]]; then
-  echo "❌ SONAR_TOKEN no está definido dentro del contenedor"
+  log_error "SONAR_TOKEN no esta definido dentro del contenedor"
   exit 1
 fi
 
 if [[ ! -f "$WHITELIST_FILE" ]]; then
-  echo "❌ No se encuentra $WHITELIST_FILE"
+  log_error "No se encuentra $WHITELIST_FILE"
   exit 1
 fi
 
-# 1) Configurar montajes disponibles para mapear rutas del host
+if ! jq -e . "$WHITELIST_FILE" >/dev/null 2>&1; then
+  log_error "El archivo $WHITELIST_FILE no es JSON valido"
+  exit 1
+fi
+
+validate_whitelist "$WHITELIST_FILE"
+
+# Configurar montajes disponibles para mapear rutas del host
 declare -a MOUNT_HOSTS=()
 declare -a MOUNT_HOSTS_LOWER=()
 declare -a MOUNT_CONTAINERS=()
 
 readarray -t mount_entries < <(jq -c '.mounts[]?' "$WHITELIST_FILE")
 
+if [[ ${#mount_entries[@]} -eq 0 ]]; then
+  log_error "No hay montajes definidos en $WHITELIST_FILE"
+  exit 1
+fi
+
 for mount_entry in "${mount_entries[@]}"; do
-  host_dir=$(jq -r '.host // empty' <<<"$mount_entry")
-  container_dir=$(jq -r '.container // empty' <<<"$mount_entry")
+  host_dir="$(jq -r '.host // empty' <<<"$mount_entry")"
+  container_dir="$(jq -r '.container // empty' <<<"$mount_entry")"
 
   if [[ -z "$host_dir" || -z "$container_dir" ]]; then
-    echo "⚠️  Montaje inválido (host/container requeridos): $mount_entry"
+    log_warn "Montaje invalido (host/container requeridos): $mount_entry"
     continue
   fi
 
@@ -85,7 +205,7 @@ for mount_entry in "${mount_entries[@]}"; do
   container_norm="$(strip_trailing_slash "$container_dir")"
 
   if [[ -z "$host_norm" || -z "$container_norm" ]]; then
-    echo "⚠️  Montaje inválido tras normalizar: $mount_entry"
+    log_warn "Montaje invalido tras normalizar: $mount_entry"
     continue
   fi
 
@@ -94,117 +214,144 @@ for mount_entry in "${mount_entries[@]}"; do
   MOUNT_CONTAINERS+=("$container_norm")
 
   if [[ ! -d "$container_norm" ]]; then
-    echo "⚠️  El contenedor no ve $container_norm (verifica docker-compose.yml)"
+    log_warn "El contenedor no ve $container_norm (verifica los montajes)"
   fi
 done
 
 if [[ ${#MOUNT_HOSTS[@]} -eq 0 ]]; then
-  while IFS='=' read -r env_key env_value; do
-    [[ -z "$env_value" ]] && continue
-    index="${env_key#MOUNT_SRC}"
-    [[ "$index" == "$env_key" ]] && continue
-    [[ -z "$index" ]] && continue
-
-    host_norm="$(strip_trailing_slash "$(normalize_windows_path "$env_value")")"
-    container_norm="/work/src$index"
-
-    MOUNT_HOSTS+=("$host_norm")
-    MOUNT_HOSTS_LOWER+=("$(to_lower "$host_norm")")
-    MOUNT_CONTAINERS+=("$container_norm")
-
-    if [[ ! -d "$container_norm" ]]; then
-      echo "⚠️  El contenedor no ve $container_norm (verifica docker-compose.yml)"
-    fi
-  done < <(env | grep -E '^MOUNT_SRC[0-9]+=' | sort)
-fi
-
-if [[ ${#MOUNT_HOSTS[@]} -eq 0 ]]; then
-  echo "❌ No hay montajes válidos (verifica whitelist.json o variables MOUNT_SRCn)"
+  log_error "No hay montajes validos (verifica whitelist.json)"
   exit 1
 fi
 
-# 2) Espera a que SonarQube esté listo (status must be UP)
-echo "⏳ Esperando a que SonarQube esté listo en $SONAR_DOCKER_URL ..."
-for i in {1..60}; do
-  # Intentamos obtener el JSON de estado. Usamos jq para extraer .status cuando esté disponible.
-  resp=$(curl -fsS "$SONAR_DOCKER_URL/api/system/status" 2>/dev/null || true)
+mkdir -p "$SONAR_USER_HOME" "$SONAR_WORK_ROOT" || true
+
+log_info "Esperando a que SonarQube este listo en $SONAR_HOST_URL ..."
+max_attempts=$(( (SONAR_WAIT_TIMEOUT_SECONDS + SONAR_WAIT_INTERVAL_SECONDS - 1) / SONAR_WAIT_INTERVAL_SECONDS ))
+for ((i=1; i<=max_attempts; i++)); do
+  resp="$(curl -fsS "$SONAR_HOST_URL/api/system/status" 2>/dev/null || true)"
   if [[ -n "$resp" ]]; then
-    status=$(jq -r '.status // empty' <<<"$resp" 2>/dev/null || true)
+    status="$(jq -r '.status // empty' <<<"$resp" 2>/dev/null || true)"
     if [[ "$status" == "UP" ]]; then
-      echo "✅ SonarQube listo (status=UP)"
+      log_info "SonarQube listo (status=UP)"
       break
     else
-      # Mostrar estado intermedio (STARTING, etc.) para debugging
-      echo "⏳ SonarQube status: ${status:-unknown} (esperando UP)..."
+      log_info "SonarQube status: ${status:-unknown} (esperando UP)..."
     fi
   else
-    echo "⏳ SonarQube no responde aún (intentos: $i)..."
+    log_info "SonarQube no responde aun (intentos: $i)..."
   fi
 
-  sleep 5
-  [[ $i -eq 60 ]] && { echo "❌ Timeout esperando SonarQube"; exit 1; }
+  sleep "$SONAR_WAIT_INTERVAL_SECONDS"
+  if [[ $i -eq $max_attempts ]]; then
+    log_error "Timeout esperando SonarQube"
+    exit 1
+  fi
 done
 
-# 3) Leer whitelist
 readarray -t projects < <(jq -c '.projects[]' "$WHITELIST_FILE")
-echo "📋 Procesando ${#projects[@]} proyectos..."
+log_info "Procesando ${#projects[@]} proyectos..."
 
-# 4) Iterar proyectos
-for proj in "${projects[@]}"; do
-  path=$(jq -r '.path // empty' <<<"$proj")
-  project_key=$(jq -r '.projectKey // empty' <<<"$proj")
-  host_path=$(jq -r '.hostPath // empty' <<<"$proj")
-  # hostPath define la ruta absoluta del proyecto en el host (obligatoria)
+scan_project() {
+  local proj="$1"
+
+  local path
+  path="$(jq -r '.path // empty' <<<"$proj")"
+  local project_key
+  project_key="$(jq -r '.projectKey // empty' <<<"$proj")"
+  local host_path
+  host_path="$(jq -r '.hostPath // empty' <<<"$proj")"
 
   if [[ -z "$host_path" ]]; then
-    echo "⚠️  hostPath no definido en la entrada: $proj"
-    continue
+    log_warn "hostPath no definido en la entrada: $proj"
+    return 1
   fi
 
+  local base_path
   base_path="$(map_host_path_to_container "$host_path")"
   if [[ -z "$base_path" ]]; then
-    echo "⚠️  No se pudo mapear hostPath='$host_path'"
-    continue
+    log_warn "No se pudo mapear hostPath='$host_path'"
+    return 1
   fi
 
-  normalized_subpath="${path#/}"
+  local normalized_subpath="${path#/}"
+  local full_path
   if [[ -n "$normalized_subpath" ]]; then
     full_path="$base_path/$normalized_subpath"
   else
     full_path="$base_path"
   fi
 
-  [[ ! -d "$full_path" ]] && { echo "⚠️  No existe: $full_path"; continue; }
+  if [[ ! -d "$full_path" ]]; then
+    log_warn "No existe: $full_path"
+    return 1
+  fi
 
-  # projectKey por defecto: nombre de carpeta
+  local project_key_default
   project_key_default="$(basename -- "$full_path")"
   project_key="${project_key:-$project_key_default}"
 
-  # Normalizar display_label con backslashes
+  local display_label
   display_label="$(normalize_windows_path "$host_path")"
   if [[ -n "$normalized_subpath" ]]; then
     display_label="$display_label\\$normalized_subpath"
   fi
 
-  echo "🔍 Analizando: $display_label -> $full_path (projectKey=$project_key)"
+  log_info "Analizando: $display_label -> $full_path (projectKey=$project_key)"
 
-  cd "$full_path"
-
-  if [[ ! -f "sonar-project.properties" ]]; then
-    echo "❌ No se encuentra sonar-project.properties en $full_path (el volumen es RO)"
-    echo "   Crea el archivo en el repo y reintenta."
-    continue
+  if [[ ! -f "$full_path/sonar-project.properties" ]]; then
+    log_warn "No se encuentra sonar-project.properties en $full_path"
+    log_warn "Crea el archivo en el repo y reintenta."
+    return 1
   fi
 
-  scanner_args=()
+  local work_dir="$SONAR_WORK_ROOT/$project_key"
+  mkdir -p "$work_dir" || true
 
-  echo "🚀 Ejecutando sonar-scanner en $full_path"
+  log_info "Ejecutando sonar-scanner en $full_path"
   if sonar-scanner \
-      -D"sonar.host.url=$SONAR_DOCKER_URL" \
+      -D"sonar.host.url=$SONAR_HOST_URL" \
       -D"sonar.token=$SONAR_TOKEN" \
-      "${scanner_args[@]}"; then
-    echo "✅ Completado: $display_label"
-  else
-    echo "❌ Falló: $display_label"
+      -D"sonar.userHome=$SONAR_USER_HOME" \
+      -D"sonar.working.directory=$work_dir" \
+      -D"sonar.projectBaseDir=$full_path"; then
+    log_info "Completado: $display_label"
+    return 0
   fi
-done
+
+  log_error "Fallo: $display_label"
+  return 1
+}
+
+failures=0
+pids=()
+
+if (( SCAN_PARALLELISM <= 1 )); then
+  for proj in "${projects[@]}"; do
+    if ! scan_project "$proj"; then
+      failures=$((failures + 1))
+    fi
+  done
+else
+  log_info "Paralelismo habilitado: $SCAN_PARALLELISM"
+  for proj in "${projects[@]}"; do
+    scan_project "$proj" &
+    pids+=("$!")
+
+    while (( $(jobs -pr | wc -l) >= SCAN_PARALLELISM )); do
+      sleep 1
+    done
+  done
+
+  for pid in "${pids[@]}"; do
+    if ! wait "$pid"; then
+      failures=$((failures + 1))
+    fi
+  done
+fi
+
+if (( failures > 0 )); then
+  log_error "Finalizado con errores: $failures"
+  exit 1
+fi
+
+log_info "Finalizado correctamente"

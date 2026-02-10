@@ -1,0 +1,4 @@
+FROM sonarsource/sonar-scanner-cli:11
+
+USER root
+RUN dnf install -y jq && dnf clean all

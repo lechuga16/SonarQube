@@ -46,6 +46,7 @@ yarn-error.log*
 # Whitelist files (may contain host paths or sensitive project lists)
 whitelist.json
 *.whitelist.json
+whitelist.generated.json
 
 # Allow explicit exceptions (uncomment to include)
 # !.vscode/settings.json
